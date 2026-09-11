@@ -264,7 +264,7 @@ def main():
     parser.add_argument("--local", required=False, default=None, help="Path to flashinfer-trace dataset root (flashinfer only)")
     parser.add_argument(
         "--task-source",
-        choices=["flashinfer", "gpumode", "kernelbench", "mlx"],
+        choices=["flashinfer", "gpumode", "kernelbench", "mlx", "flashrt"],
         default="flashinfer",
         help="Task backend to use.",
     )
@@ -284,6 +284,16 @@ def main():
         help="Target language for generated kernel",
     )
     parser.add_argument("--target-gpu", default="H100", help="Target GPU architecture hint for prompts")
+    parser.add_argument(
+        "--target-profile",
+        default=None,
+        help=(
+            "Path to a target-profile JSON artifact generated ON the validation device "
+            "(python -m flash_rt.kopt.device_profile --json). Authoritative for the prompt "
+            "hardware block; overrides the static table keyed on --target-gpu. K-Search never "
+            "probes the local device."
+        ),
+    )
     parser.add_argument("--max-opt-rounds", type=int, default=5, help="Max optimization rounds for each solution generation")
 
     # Benchmark configuration
@@ -357,6 +367,48 @@ def main():
     parser.add_argument("--gpumode-keep-tmp", action="store_true", help="Keep GPUMode temp working dir for debugging")
     parser.add_argument("--gpumode-task-dir", default=None, help="Override GPUMode task dir (defaults to vendored trimul task)")
 
+    # FlashRT options
+    parser.add_argument(
+        "--flashrt-tunable",
+        default=None,
+        help="FlashRT tunable id to optimize (required for --task-source=flashrt).",
+    )
+    parser.add_argument(
+        "--flashrt-referee",
+        default="python -m flash_rt.kopt.referee",
+        help="Command that invokes the FlashRT referee CLI on the validation device.",
+    )
+    parser.add_argument(
+        "--flashrt-target",
+        default="",
+        help=(
+            "Named validation device (profile + transport + referee endpoint). Used to "
+            "namespace artifacts by (tunable, target)."
+        ),
+    )
+    parser.add_argument(
+        "--flashrt-referee-host",
+        default="",
+        help="SSH host for --transport=ssh.",
+    )
+    parser.add_argument(
+        "--flashrt-referee-endpoint",
+        default="",
+        help="HTTP endpoint for --transport=service.",
+    )
+    parser.add_argument(
+        "--flashrt-timeout-seconds",
+        type=float,
+        default=None,
+        help="Per-evaluate timeout for the referee call.",
+    )
+    parser.add_argument(
+        "--transport",
+        default="local",
+        choices=["local", "ssh", "service"],
+        help="How to reach the FlashRT referee.",
+    )
+
     # KernelBench options
     parser.add_argument("--kernelbench-level", type=int, default=1, help="KernelBench level (1, 2, or 3)")
     parser.add_argument("--kernelbench-problem-id", type=int, default=1, help="Problem ID within the level")
@@ -365,6 +417,13 @@ def main():
     parser.add_argument("--kernelbench-num-perf-trials", type=int, default=100, help="Number of performance trials")
 
     args = parser.parse_args()
+
+    # Publish the target profile so the CUDA prompt builders can pick it up without a
+    # new parameter threaded through the search loop (see k_search.utils.cuda_gpu_info).
+    if getattr(args, "target_profile", None):
+        from k_search.utils.cuda_gpu_info import TARGET_PROFILE_ENV_VAR
+
+        os.environ[TARGET_PROFILE_ENV_VAR] = str(args.target_profile)
 
     # MLX runs on Apple Silicon; the CUDA-style --target-gpu hint is not meaningful.
     # If Metal is available, replace it with an auto-detected device name
@@ -467,6 +526,31 @@ def main():
                 "mlx_mamba_selective_scan_fwd. "
                 f"Got {def_name!r}."
             )
+    elif task_source == "flashrt":
+        from k_search.tasks.flashrt_tunable_task import FlashRTTunableTask
+        from k_search.tasks.flashrt.transport import make_transport
+
+        if str(args.language).strip().lower() != "cuda":
+            raise ValueError("--task-source=flashrt requires --language cuda")
+        tunable_id = str(args.flashrt_tunable or args.definition or "").strip()
+        if not tunable_id:
+            raise ValueError("--flashrt-tunable is required for --task-source=flashrt")
+
+        transport = make_transport(
+            str(args.transport or "local"),
+            referee_cmd=str(args.flashrt_referee or ""),
+            host=str(args.flashrt_referee_host or ""),
+            endpoint=str(args.flashrt_referee_endpoint or ""),
+        )
+        task = FlashRTTunableTask(
+            tunable_id=tunable_id,
+            transport=transport,
+            target=str(args.flashrt_target or ""),
+            target_profile=args.target_profile,
+            target_gpu=args.target_gpu,
+            timeout_seconds=args.flashrt_timeout_seconds,
+            artifacts_dir=args.artifacts_dir,
+        )
     else:
         raise ValueError(f"Unsupported task_source: {task_source}")
 

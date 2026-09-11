@@ -31,6 +31,23 @@ DIMENSION_ENTRY_DEFAULT: dict[str, Any] = {
 }
 
 
+def _target_hardware_block(*, target_gpu: str, language: str) -> str:
+    """Render the target hardware section of a world-model prompt.
+
+    For CUDA the bare GPU name is replaced by the target profile (design §4.2): the
+    world model is asked to rate hardware fit, and this is the prompt that seeds the
+    whole decision tree, so it is the highest-value place for real hardware numbers.
+    When no profile is available the block says so instead of substituting a guess.
+    """
+    if str(language or "").strip().lower() == "cuda":
+        from k_search.utils.cuda_gpu_info import get_gpu_info_or_placeholder
+
+        block = get_gpu_info_or_placeholder(None, str(target_gpu or "")).strip()
+        if block:
+            return block + "\n"
+    return f"Target GPU: {target_gpu}\n"
+
+
 def _eval_status_score_for_prompt(ev: Any) -> dict[str, Any]:
     """
     Minimal eval payload for prompts: include only status and score (plus score_name if available).
@@ -145,6 +162,12 @@ def _truncate(s: str, max_chars: int) -> str:
     return s[:head] + "\n...<truncated>...\n" + s[-20:]
 
 
+# Below this many selected lines, section matching is treated as having failed
+# (the two unconditional title lines alone do not constitute a kernel spec).
+_COMPACT_MIN_USEFUL_LINES = 3
+_COMPACT_FALLBACK_CHARS = 6000
+
+
 def compact_definition_for_wm_prompt(definition_text: str, *, max_ref_lines: int = 40) -> str:
     """
     Produce a compact, structured kernel spec for WM prompts.
@@ -203,6 +226,15 @@ def compact_definition_for_wm_prompt(definition_text: str, *, max_ref_lines: int
     # Final cleanup: strip trailing empties.
     while out and not out[-1].strip():
         out.pop()
+
+    # Section selection only fires for definition texts using these exact headers,
+    # which in practice is flashinfer-bench alone: kernelbench, gpu_mode, mlx_mamba
+    # and flashrt all use other formats, and every one of them was silently reduced
+    # to the two title lines above. A world model given a two-line spec keeps
+    # re-asking for the tensor shapes it was never shown. Head truncation is a poor
+    # projection but an enormously better one than nothing.
+    if len(out) <= _COMPACT_MIN_USEFUL_LINES:
+        return _truncate(s, _COMPACT_FALLBACK_CHARS)
     return "\n".join(out).strip()
 
 
@@ -853,7 +885,7 @@ def build_world_model_prompts(
     init_prompt = (
         "You are a GPU kernel performance engineer.\n"
         "Create an initial WORLD MODEL for the kernel problem below.\n\n"
-        f"Target GPU: {target_gpu}\n"
+        f"{_target_hardware_block(target_gpu=target_gpu, language=language)}"
         f"Language: {language}\n\n"
         "Kernel Specification:\n"
         f"{_truncate(definition_text, max_chars_per_block)}\n\n"
@@ -901,6 +933,12 @@ def build_world_model_prompts(
         "  Populate the tree with at least 3 OPEN action nodes (nodes with no attached solution_id but with node.action.title filled).\n"
         "  These actions must be small, single-iteration implementable changes.\n"
         "  For each OPEN action node, fill action.title/action.description concisely.\n"
+        "  STRUCTURE (required): every initial OPEN action node must have parent_id='root'.\n"
+        "  Do NOT insert intermediate grouping/taxonomy nodes between root and an action:\n"
+        "  a node is only selectable once its PARENT has an attached solution, so an action\n"
+        "  parented to a category node that will never be implemented is unreachable forever.\n"
+        "  Encode the category in action.title instead. Deeper nodes are for genuine\n"
+        "  multi-step chains, where step 2 builds on the solution attached to step 1.\n"
         "  Avoid hardcoding implementation details like launch/grid/block dims.\n"
         "- Self-check for branching (REQUIRED):\n"
         "  - Whenever you create multiple sibling children under the same parent, treat them as true alternatives.\n"
@@ -1009,7 +1047,8 @@ def build_decision_tree_edit_prompt(
     return (
         "You are the WORLD MODEL module.\n"
         "Output ONLY a JSON edit script (no markdown, no extra text).\n\n"
-        f"Target GPU: {target_gpu}\nLanguage: {language}\n\n"
+        f"{_target_hardware_block(target_gpu=target_gpu, language=language)}"
+        f"Language: {language}\n\n"
         "Kernel specification (reference):\n"
         f"{def_s}\n\n"
         "Current world model (compact):\n"

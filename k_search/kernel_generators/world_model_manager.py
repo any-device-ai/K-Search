@@ -53,7 +53,7 @@ class WorldModelSelectionPolicy:
     max_difficulty_1_to_5: int = 4
     # Allow slightly harder actions once the best observed vs_base is strong enough.
     relax_difficulty_if_best_vs_base_ge: float = 0.5
-    relaxed_max_difficulty_1_to_5: int = 4
+    relaxed_max_difficulty_1_to_5: int = 5
 
     # Utility weights (higher => more important). Utility is maximized.
     w_score: float = 3.0

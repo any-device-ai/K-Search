@@ -32,6 +32,8 @@ Rules:
 - Preserve correctness and the function signature / wrapper behavior.
 - Return only the full updated code (no explanations, no markdown).
 
+{per_task_requirement}
+
 {hints}
 
 Generate the updated implementation:"""
@@ -63,6 +65,8 @@ Generate the updated implementation:"""
 
 CUDA_ACTION_PROMPT = """You are implementing a SPECIFIC NEXT ACTION on top of a known-good CUDA baseline for {target_gpu}.
 
+{gpu_info}
+
 Original Specification:
 {definition}
 
@@ -79,6 +83,8 @@ Rules:
 - Return only the full updated XML blocks (no explanations, no markdown).
 
 {code_format}
+
+{per_task_requirement}
 
 {hints}
 
@@ -116,6 +122,8 @@ Rules:
 - Keep changes minimal; do not introduce extra unrelated optimizations.
 - Keep the implementation aligned with the base and the chosen action intent.
 - Return only the full corrected code (no explanations, no markdown).
+
+{per_task_requirement}
 
 {hints}
 
@@ -162,6 +170,8 @@ Generate the corrected implementation:"""
 CUDA_DEBUG_PROMPT = """You are in a debug-and-improve loop for a CUDA kernel on {target_gpu}.
 The current implementation may be buggy OR already correct-but-slower-than-desired.
 
+{gpu_info}
+
 Original Specification:
 {definition}
 
@@ -190,6 +200,8 @@ Rules:
 - Return only the full corrected XML blocks (no explanations, no markdown).
 
 {code_format}
+
+{per_task_requirement}
 
 {hints}
 
@@ -223,6 +235,8 @@ Rules:
 - If the current implementation PASSED: improve performance while preserving correctness.
 - Keep changes minimal; do not introduce extra unrelated optimizations.
 - Return only the full corrected code (no explanations, no markdown).
+
+{per_task_requirement}
 
 {hints}
 
@@ -265,6 +279,8 @@ Generate the improved implementation:"""
 CUDA_IMPROVE_PROMPT = """You are improving a CUDA kernel on {target_gpu}.
 The current implementation may be correct-but-slower-than-desired, or it may have regressed.
 
+{gpu_info}
+
 Original Specification:
 {definition}
 
@@ -290,6 +306,8 @@ Rules:
 
 {code_format}
 
+{per_task_requirement}
+
 {hints}
 
 Generate the improved implementation:"""
@@ -302,6 +320,7 @@ def get_generate_code_from_action_prompt_from_text(
     action_text: str,
     code_format: str = "",
     target_gpu: str = "H100",
+    per_task_requirement: str = "",
 ) -> str:
     """Task-agnostic variant: accepts rendered definition text."""
     lang = (language or "").lower()
@@ -312,6 +331,7 @@ def get_generate_code_from_action_prompt_from_text(
             action_text=action_text,
             target_gpu=target_gpu,
             code_format=str(code_format or "").strip(),
+            per_task_requirement=str(per_task_requirement or "").strip(),
             hints=TRITON_OPTIMIZATION_HINTS,
         )
     if lang == "mlx":
@@ -325,12 +345,16 @@ def get_generate_code_from_action_prompt_from_text(
             code_format=str(code_format or "").strip(),
         )
     if lang == "cuda":
+        from k_search.utils.cuda_gpu_info import get_gpu_info_or_placeholder
+
         return CUDA_ACTION_PROMPT.format(
+            gpu_info=get_gpu_info_or_placeholder(None, str(target_gpu or "")),
             definition=str(definition_text or "").strip(),
             base_code=base_code,
             action_text=action_text,
             target_gpu=target_gpu,
             code_format=str(code_format or "").strip(),
+            per_task_requirement=str(per_task_requirement or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
         )
     raise ValueError(f"Unsupported language for action prompt: {language}")
@@ -343,6 +367,7 @@ def get_generate_code_from_spec_with_action_prompt_from_text(
     action_text: str,
     code_format: str = "",
     target_gpu: str = "H100",
+    per_task_requirement: str = "",
 ) -> str:
     """
     Task-agnostic variant: accepts rendered definition text.
@@ -358,18 +383,23 @@ def get_generate_code_from_spec_with_action_prompt_from_text(
                 action_text=action_text,
                 target_gpu=target_gpu,
                 code_format=str(code_format or "").strip(),
+                per_task_requirement=str(per_task_requirement or "").strip(),
                 hints=TRITON_OPTIMIZATION_HINTS,
             )
         )
     if lang == "cuda":
+        from k_search.utils.cuda_gpu_info import get_gpu_info_or_placeholder
+
         return (
             "You are implementing a SPECIFIC NEXT ACTION starting from the specification.\n\n"
             + CUDA_ACTION_PROMPT.format(
+                gpu_info=get_gpu_info_or_placeholder(None, str(target_gpu or "")),
                 definition=str(definition_text or "").strip(),
                 base_code="(no base code; start from spec)",
                 action_text=action_text,
                 target_gpu=target_gpu,
                 code_format=str(code_format or "").strip(),
+                per_task_requirement=str(per_task_requirement or "").strip(),
                 hints=CUDA_OPTIMIZATION_HINTS,
             )
         )
@@ -402,6 +432,7 @@ def get_debug_and_improve_from_spec_prompt_from_text(
     target_gpu: str = "H100",
     perf_summary: str = "",
     base_code: str = "(no base code; start from spec)",
+    per_task_requirement: str = "",
 ) -> str:
     return get_debug_generated_code_prompt_from_text(
         language,
@@ -415,6 +446,7 @@ def get_debug_and_improve_from_spec_prompt_from_text(
         max_rounds=max_rounds,
         target_gpu=target_gpu,
         perf_summary=perf_summary,
+        per_task_requirement=per_task_requirement,
     )
 
 
@@ -431,6 +463,7 @@ def get_debug_generated_code_prompt_from_text(
     max_rounds: int = 5,
     target_gpu: str = "H100",
     perf_summary: str = "",
+    per_task_requirement: str = "",
 ) -> str:
     """Task-agnostic variant: accepts rendered definition + rendered trace logs."""
     lang = (language or "").lower()
@@ -454,10 +487,14 @@ def get_debug_generated_code_prompt_from_text(
             max_rounds=mr,
             target_gpu=target_gpu,
             code_format=str(code_format or "").strip(),
+            per_task_requirement=str(per_task_requirement or "").strip(),
             hints=TRITON_OPTIMIZATION_HINTS,
         )
     if lang == "cuda":
+        from k_search.utils.cuda_gpu_info import get_gpu_info_or_placeholder
+
         return CUDA_DEBUG_PROMPT.format(
+            gpu_info=get_gpu_info_or_placeholder(None, str(target_gpu or "")),
             definition=str(definition_text or "").strip(),
             base_code=base_code,
             buggy_code=buggy_code,
@@ -468,6 +505,7 @@ def get_debug_generated_code_prompt_from_text(
             max_rounds=mr,
             target_gpu=target_gpu,
             code_format=str(code_format or "").strip(),
+            per_task_requirement=str(per_task_requirement or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
         )
     if lang == "mlx":
@@ -500,6 +538,7 @@ def get_improve_from_spec_prompt_from_text(
     target_gpu: str = "H100",
     perf_summary: str = "",
     base_code: str = "(no base code; start from spec)",
+    per_task_requirement: str = "",
 ) -> str:
     return get_improve_generated_code_prompt_from_text(
         language,
@@ -512,6 +551,7 @@ def get_improve_from_spec_prompt_from_text(
         max_rounds=max_rounds,
         target_gpu=target_gpu,
         perf_summary=perf_summary,
+        per_task_requirement=per_task_requirement,
     )
 
 
@@ -527,6 +567,7 @@ def get_improve_generated_code_prompt_from_text(
     max_rounds: int = 5,
     target_gpu: str = "H100",
     perf_summary: str = "",
+    per_task_requirement: str = "",
 ) -> str:
     """Task-agnostic variant: accepts rendered definition + rendered trace logs."""
     lang = (language or "").lower()
@@ -549,10 +590,14 @@ def get_improve_generated_code_prompt_from_text(
             max_rounds=mr,
             target_gpu=target_gpu,
             code_format=str(code_format or "").strip(),
+            per_task_requirement=str(per_task_requirement or "").strip(),
             hints=TRITON_OPTIMIZATION_HINTS,
         )
     if lang == "cuda":
+        from k_search.utils.cuda_gpu_info import get_gpu_info_or_placeholder
+
         return CUDA_IMPROVE_PROMPT.format(
+            gpu_info=get_gpu_info_or_placeholder(None, str(target_gpu or "")),
             definition=str(definition_text or "").strip(),
             base_code=base_code,
             current_code=current_code,
@@ -562,6 +607,7 @@ def get_improve_generated_code_prompt_from_text(
             max_rounds=mr,
             target_gpu=target_gpu,
             code_format=str(code_format or "").strip(),
+            per_task_requirement=str(per_task_requirement or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
         )
     if lang == "mlx":

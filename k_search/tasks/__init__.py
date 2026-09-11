@@ -32,4 +32,11 @@ try:  # pragma: no cover
 except Exception:
     GpuModeTriMulTask = None  # type: ignore
 
+try:  # pragma: no cover
+    from k_search.tasks.flashrt_tunable_task import FlashRTTunableTask
+
+    __all__.append("FlashRTTunableTask")
+except Exception:
+    FlashRTTunableTask = None  # type: ignore
+
 

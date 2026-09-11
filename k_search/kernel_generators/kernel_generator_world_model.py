@@ -7,6 +7,7 @@ and only override prompt construction to inject the persistent world model JSON.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 from pathlib import Path
@@ -36,6 +37,21 @@ from k_search.kernel_generators.world_model import (
 from k_search.utils.solution_db import SolutionDB
 from k_search.utils.paths import get_ksearch_artifacts_dir
 
+# A bare `>` on a noisy score promotes any lucky sample and then freezes it as the
+# bar every later round must clear. Require the improvement to clear the
+# measurement floor instead. 0.005 is ~3 sd of the referee's measured ratio
+# spread once it reports a trimmed mean on a settled clock; at the old 2% the
+# rule rejected 95% of genuine 1% wins while still admitting noise over a long
+# run. Tune per backend via KSEARCH_ACCEPT_MARGIN; 0.0 restores a bare `>`.
+ACCEPT_MARGIN = float(os.getenv("KSEARCH_ACCEPT_MARGIN", "0.005"))
+
+
+def _beats(score: float, incumbent: float) -> bool:
+    """Is `score` better than `incumbent` by more than the measurement floor?"""
+    if incumbent <= 0:
+        return score > incumbent
+    return score > incumbent * (1.0 + ACCEPT_MARGIN)
+
 
 class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     """Baseline-aware generator variant that maintains and injects a persistent world model."""
@@ -59,7 +75,18 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             if not wm_s:
                 return
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(wm_s, encoding="utf-8")
+            # Atomic. A bare write_text that is interrupted leaves a truncated
+            # world_model.json, and `--continue-from-world-model auto` then
+            # refuses to start at all -- a silent total loss for an unattended
+            # overnight run. Keep one generation back as well.
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(wm_s, encoding="utf-8")
+            if p.exists():
+                try:
+                    p.replace(p.with_suffix(".json.prev"))
+                except OSError:
+                    pass
+            os.replace(tmp, p)
         except Exception:
             pass
 
@@ -361,13 +388,37 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 + "\n- Optimize for overall mean latency across the listed workloads while maintaining correctness."
             )
 
-        def _code_format_text() -> str:
+        def _code_format_text(*, per_task_requirement: str = "") -> str:
             hook = getattr(task, "get_code_format_text", None)
             if not callable(hook):
                 return ""
             try:
-                return str(
+                text = str(
                     hook(language=str(self.language), target_gpu=str(self.target_gpu)) or ""
+                ).strip()
+            except Exception:
+                return ""
+            # The two placeholders sit adjacent in the templates, and both the
+            # FlashRT and FlashInferBench tasks embed the same XML-format and
+            # invariant blocks in each hook. Emitting both duplicated ~2.2 KB of
+            # identical instructions in every prompt. The base generator never hit
+            # this because it only ever passes per_task_requirement.
+            if text and text in str(per_task_requirement or ""):
+                return ""
+            return text
+
+        def _per_task_requirement_text(*, phase: str) -> str:
+            hook = getattr(task, "get_per_task_requirement_text", None)
+            if not callable(hook):
+                return ""
+            try:
+                return str(
+                    hook(
+                        language=str(self.language),
+                        target_gpu=str(self.target_gpu),
+                        phase=str(phase or ""),
+                    )
+                    or ""
                 ).strip()
             except Exception:
                 return ""
@@ -559,16 +610,18 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             definition_text=definition_text,
                             base_code=base_raw_code,
                             action_text=chosen_action_text,
-                            code_format=_code_format_text(),
+                            code_format=_code_format_text(per_task_requirement=_per_task_requirement_text(phase="optimize")),
                             target_gpu=self.target_gpu,
+                            per_task_requirement=_per_task_requirement_text(phase="optimize"),
                         )
                     else:
                         prompt = get_generate_code_from_spec_with_action_prompt_from_text(
                             self.language,
                             definition_text=definition_text,
                             action_text=chosen_action_text,
-                            code_format=_code_format_text(),
+                            code_format=_code_format_text(per_task_requirement=_per_task_requirement_text(phase="generate")),
                             target_gpu=self.target_gpu,
+                            per_task_requirement=_per_task_requirement_text(phase="generate"),
                         )
                 else:
                     if parent_is_root or not base_raw_code:
@@ -606,12 +659,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 current_code=str(current_raw_code or ""),
                                 action_text=str(chosen_action_text or ""),
-                                code_format=_code_format_text(),
+                                code_format=_code_format_text(per_task_requirement=_per_task_requirement_text(phase="optimize")),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
                                 target_gpu=self.target_gpu,
                                 perf_summary=perf_summary,
                                 base_code=base_for_debug,
+                                per_task_requirement=_per_task_requirement_text(phase="optimize"),
                             )
                         else:
                             prompt = get_improve_from_spec_prompt_from_text(
@@ -619,12 +673,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 definition_text=definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 current_code=str(current_raw_code or ""),
-                                code_format=_code_format_text(),
+                                code_format=_code_format_text(per_task_requirement=_per_task_requirement_text(phase="optimize")),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
                                 target_gpu=self.target_gpu,
                                 perf_summary=perf_summary,
                                 base_code=base_for_debug,
+                                per_task_requirement=_per_task_requirement_text(phase="optimize"),
                             )
                     else:
                         has_passed_in_cycle = cycle_best_solution is not None
@@ -658,11 +713,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 base_code=base_for_debug,
                                 buggy_code=str(current_raw_code or ""),
                                 action_text=str(chosen_action_text or ""),
-                                code_format=_code_format_text(),
+                                code_format=_code_format_text(per_task_requirement=_per_task_requirement_text(phase="optimize")),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
                                 target_gpu=self.target_gpu,
                                 perf_summary=perf_summary,
+                                per_task_requirement=_per_task_requirement_text(phase="optimize"),
                             )
                         else:
                             prompt = get_improve_generated_code_prompt_from_text(
@@ -671,11 +727,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 base_code=base_for_debug,
                                 current_code=str(current_raw_code or ""),
-                                code_format=_code_format_text(),
+                                code_format=_code_format_text(per_task_requirement=_per_task_requirement_text(phase="optimize")),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
                                 target_gpu=self.target_gpu,
                                 perf_summary=perf_summary,
+                                per_task_requirement=_per_task_requirement_text(phase="optimize"),
                             )
 
                 prompt = prompt + "\n\n" + render_world_model_section(self._wm.get(task.name), max_chars=self._world_model_max_chars)
@@ -777,7 +834,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     except Exception:
                         pass
 
-                if all_passed and round_score > best_score:
+                if all_passed and _beats(round_score, best_score):
                     best_score = float(round_score)
                     best_eval = round_eval
                     best_solution = solution
@@ -785,7 +842,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 if all_passed:
                     er = round_eval
                     score = float(getattr(er, "score", lambda: -1.0)())
-                    if score > cycle_best_score:
+                    if _beats(score, cycle_best_score):
                         cycle_best_score = float(score)
                         cycle_best_eval = er
                         cycle_best_solution = solution

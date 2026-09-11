@@ -5,3 +5,5 @@ wandb/
 openevolve_output/
 *.log
 .DS_Store
+
+.ksearch-flashrt/

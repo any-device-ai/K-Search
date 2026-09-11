@@ -9,7 +9,10 @@ NO_TORCH_FALLBACK_WARNING = """**IMPORTANT**: Avoid using torch functions as fal
 
 # CUDA-specific hints
 # Note: keep these hints generic (avoid naming specific low-level instructions).
-CUDA_OPTIMIZATION_HINTS = f"** You MUST use MMA to utilize the tensor cores on H100! ** For each round, you can see your current best solution and the previous round's summary, therefore you can implement the kernel step by step."
+# Hardware specifics belong in the target profile block, not here: hardcoding one
+# architecture's advice sends the model down the wrong path on every other target.
+CUDA_OPTIMIZATION_HINTS = f"""** Take the target GPU profile above as ground truth: use the compute capability, tensor-core generation and available numeric formats it reports, and do not use an instruction or dtype it does not list. **
+** For each round, you can see your current best solution and the previous round's summary, therefore you can implement the kernel step by step."""
 
 # Triton-appropriate subset
 TRITON_OPTIMIZATION_HINTS = f"""
@@ -51,6 +54,8 @@ Generate the corrected and optimized implementation:"""
 # CUDA prompt
 CUDA_PROMPT = """You are a code generator. Generate a CUDA kernel implementation optimized for {target_gpu} GPU for the following specification.
 
+{gpu_info}
+
 Specification:
 {definition}
 
@@ -61,6 +66,8 @@ Specification:
 Generate the implementation:"""
 
 CUDA_OPTIMIZATION_PROMPT = """You are optimizing a CUDA kernel for {target_gpu} GPU. The current implementation has issues that need to be fixed.
+
+{gpu_info}
 
 Original Specification:
 {definition}
@@ -104,9 +111,12 @@ def get_prompt_from_definition_text(
             hints=TRITON_OPTIMIZATION_HINTS,
         )
     if language == "cuda":
+        from k_search.utils.cuda_gpu_info import get_gpu_info_or_placeholder
+
         return prompts[language].format(
             definition=str(definition_text or "").strip(),
             target_gpu=target_gpu,
+            gpu_info=get_gpu_info_or_placeholder(None, str(target_gpu or "")),
             per_task_requirement=str(per_task_requirement or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
         )
@@ -148,11 +158,14 @@ def get_optimization_prompt_from_definition_text(
             extra_context=extra_context,
         )
     if language == "cuda":
+        from k_search.utils.cuda_gpu_info import get_gpu_info_or_placeholder
+
         return optimization_prompts[language].format(
             definition=str(definition_text or "").strip(),
             trace_logs=str(trace_logs or "").strip(),
             current_code=current_code,
             target_gpu=target_gpu,
+            gpu_info=get_gpu_info_or_placeholder(None, str(target_gpu or "")),
             per_task_requirement=str(per_task_requirement or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
             extra_context=extra_context,
